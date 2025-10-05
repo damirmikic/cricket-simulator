@@ -229,16 +229,13 @@ if uploaded_files:
             st.header("Lineup Creator")
             team_to_build = st.selectbox("Select Team to Build Lineup", teams_players.keys())
             if team_to_build:
-                st.multiselect(f"Select 11 Players for {team_to_build}", options=teams_players[team_to_build], max_selections=11)
-            
-            st.header("Suggested Lineup (from Last Match)")
-            if st.button(f"Suggest Lineup for {team_to_build}", use_container_width=True):
-                lineup = get_last_match_lineup(team_to_build, uploaded_files)
-                if lineup:
-                    st.success(f"Suggested lineup for {team_to_build}:")
-                    st.write(", ".join(lineup))
-                else:
-                    st.warning(f"Could not find a previous match for {team_to_build} in the uploaded files.")
+                suggested_lineup = get_last_match_lineup(team_to_build, uploaded_files)
+                st.multiselect(
+                    f"Select 11 Players for {team_to_build} (pre-filled with last match's lineup)",
+                    options=teams_players[team_to_build],
+                    default=suggested_lineup,
+                    max_selections=11
+                )
 
         with tabs[3]: # Fast Simulator
             st.header("⚡ Fast Match Simulator")
@@ -246,13 +243,21 @@ if uploaded_files:
             team_list = list(teams_players.keys())
             t1_name = sim_cols[0].selectbox("Select Team 1", team_list, key="sim_t1")
             t2_name = sim_cols[1].selectbox("Select Team 2", team_list, index=1 if len(team_list) > 1 else 0, key="sim_t2")
+
+            st.subheader("Team Parameters")
+            param_cols = st.columns(2)
+            t1_stats = team_stats[team_stats['team'] == t1_name].iloc[0]
+            t2_stats = team_stats[team_stats['team'] == t2_name].iloc[0]
+            with param_cols[0]:
+                st.metric(label=f"{t1_name} Avg. Run Rate", value=f"{t1_stats['run_rate']:.2f}")
+                st.metric(label=f"{t1_name} Avg. Wicket Rate", value=f"{t1_stats['wicket_rate']:.2f}")
+            with param_cols[1]:
+                st.metric(label=f"{t2_name} Avg. Run Rate", value=f"{t2_stats['run_rate']:.2f}")
+                st.metric(label=f"{t2_name} Avg. Wicket Rate", value=f"{t2_stats['wicket_rate']:.2f}")
             
             num_sims = st.number_input("How many simulations?", 1, 10000, 100)
 
             if st.button("▶️ Run Fast Simulation", use_container_width=True):
-                t1_stats = team_stats[team_stats['team'] == t1_name].iloc[0]
-                t2_stats = team_stats[team_stats['team'] == t2_name].iloc[0]
-                
                 wins = {t1_name: 0, t2_name: 0}
                 results = {t1_name: [], t2_name: []}
                 
