@@ -230,6 +230,8 @@ if uploaded_files:
             team_to_build = st.selectbox("Select Team to Build Lineup", teams_players.keys())
             if team_to_build:
                 suggested_lineup = get_last_match_lineup(team_to_build, uploaded_files)
+                # FIX: Ensure the default list does not exceed max_selections
+                suggested_lineup = suggested_lineup[:11] 
                 st.multiselect(
                     f"Select 11 Players for {team_to_build} (pre-filled with last match's lineup)",
                     options=teams_players[team_to_build],
