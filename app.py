@@ -110,6 +110,33 @@ def calculate_form_stats(team, df):
     return pd.Series(stats)
 
 # --- Simulation Functions ---
+def simulate_fast_innings(rr, wr):
+    """Simulates a fast innings based on average run and wicket rates."""
+    score = 0
+    wickets = 0
+    for _ in range(120):
+        if wickets >= 10:
+            break
+
+        prob_wicket = wr / 6.0
+        
+        # Using a similar outcome-probability logic as simulate_ball_by_phase
+        prob_dot = max(0.1, 0.5 - (rr / 20.0))
+        prob_four = max(0.05, (rr / 60.0))
+        prob_six = max(0.02, (rr / 90.0))
+        
+        outcomes = ['WICKET', 0, 1, 2, 4, 6]
+        weights = [prob_wicket, prob_dot, 0.35, 0.05, prob_four, prob_six]
+        norm_weights = [w / sum(weights) for w in weights]
+        outcome = random.choices(outcomes, norm_weights)[0]
+        
+        if outcome == 'WICKET':
+            wickets += 1
+        else:
+            score += outcome
+            
+    return score, wickets
+
 def simulate_ball_by_phase(phase, phase_stats):
     """Simulates a single ball based on team's phase performance."""
     phase_data = phase_stats.get(phase, {})
@@ -270,4 +297,3 @@ if uploaded_files:
         st.warning("Could not process uploaded files. Please check file format and content.")
 else:
     st.info("👋 Welcome! Upload JSON match logs to begin.")
-
