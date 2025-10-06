@@ -172,6 +172,16 @@ if st.session_state.files:
         team_stats = innings_df.groupby('team').agg(run_rate=('run_rate', 'mean'), wicket_rate=('wicket_rate', 'mean')).round(2).reset_index()
 
         tab1, tab2, tab3 = st.tabs(["📊 Team & Player Stats", "⚡ Fast Simulator (Team-Based)", "🏏 Advanced Simulator (Player-Based)"])
+        
+        # FIX: Added the missing code block for Tab 1
+        with tab1:
+            st.header("Team Performance Summary")
+            st.dataframe(team_stats)
+            st.header("Player Performance")
+            st.subheader("Batting Stats")
+            st.dataframe(batting_df.sort_values('runs', ascending=False))
+            st.subheader("Bowling Stats")
+            st.dataframe(bowling_df.sort_values('wickets', ascending=False))
 
         with tab2:
             st.header("⚡ Fast Match Simulator"); team_list = list(teams_players.keys())
