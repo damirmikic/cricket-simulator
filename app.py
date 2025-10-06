@@ -149,10 +149,22 @@ def simulate_player_based_innings(batting_lineup, bowling_lineup, batting_df, bo
 st.set_page_config(page_title="Cricket Predictive Model", layout="wide")
 st.title("🏏 Cricket Predictive Model")
 
-if 'files' not in st.session_state: st.session_state.files = None
-uploaded_files = st.sidebar.file_uploader("Upload JSON match logs", type=['json'], accept_multiple_files=True)
-if uploaded_files: st.session_state.files = uploaded_files
+# Initialize session state for file persistence
+if 'files' not in st.session_state:
+    st.session_state.files = None
 
+# Sidebar for file uploading and clearing
+with st.sidebar:
+    st.header("Upload Match Data")
+    uploaded_files = st.file_uploader("Upload JSON match logs", type=['json'], accept_multiple_files=True)
+    if uploaded_files:
+        st.session_state.files = uploaded_files
+    
+    if st.button("Clear Uploaded Files"):
+        st.session_state.files = None
+        st.rerun() # Rerun the app to reflect the cleared state
+
+# Main app logic
 if st.session_state.files:
     innings_df, batting_df, bowling_df, teams_players = process_all_matches_and_players(st.session_state.files)
     
@@ -221,3 +233,8 @@ if st.session_state.files:
                     bat_card = pd.DataFrame.from_dict(result['batting_card'], orient='index').reset_index().rename(columns={'index':'Batter'})
                     bowl_card = pd.DataFrame.from_dict(result['bowling_card'], orient='index').reset_index().rename(columns={'index':'Bowler'})
                     c1,c2=st.columns(2); c1.dataframe(bat_card); c2.dataframe(bowl_card)
+    else:
+        st.warning("Could not process uploaded files.")
+
+else:
+    st.info("👋 Welcome! Upload JSON match logs to begin.")
