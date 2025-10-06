@@ -101,6 +101,50 @@ def summarize_match(file):
         return summary
     except Exception as e: return {"error": str(e)}
 
+def simulate_fast_innings(team_stats):
+    score, wickets, fours, sixes = 0, 0, 0, 0
+    rr, wr = team_stats['run_rate'], team_stats['wicket_rate']
+    for i in range(120):
+        if wickets >= 10: break
+        prob_wicket = wr / 6.0; prob_dot = max(0.1, 0.5 - (rr/20.0)); prob_four = max(0.05, (rr/60.0)); prob_six = max(0.02, (rr/90.0))
+        outcomes, weights = ['WICKET', 0, 1, 2, 4, 6], [prob_wicket, prob_dot, 0.35, 0.05, prob_four, prob_six]
+        outcome = random.choices(outcomes, [w / sum(weights) for w in weights])[0]
+        if outcome == 'WICKET': wickets += 1
+        else:
+            score += outcome
+            if outcome == 4: fours += 1
+            if outcome == 6: sixes += 1
+    return {"score": score, "wickets": wickets, "fours": fours, "sixes": sixes}
+
+def simulate_player_based_innings(batting_lineup, bowling_lineup, batting_df, bowling_df):
+    score, wickets = 0, 0; on_strike, off_strike = batting_lineup[0], batting_lineup[1]; bowler_idx = 0
+    bat_stats = {p: {'runs': 0, 'balls': 0} for p in batting_lineup}
+    bowl_stats = {p: {'runs': 0, 'balls': 0, 'wickets': 0} for p in bowling_lineup}
+    
+    for i in range(120):
+        if wickets >= 10: break
+        bowler = bowling_lineup[bowler_idx % len(bowling_lineup)]
+        batter_sr = batting_df.loc[on_strike]['strike_rate'] if on_strike in batting_df.index else 90
+        bowler_econ = bowling_df.loc[bowler]['economy'] if bowler in bowling_df.index else 8.0
+        bowler_sr = bowling_df.loc[bowler]['bowling_sr'] if bowler in bowling_df.index else 30
+
+        prob_wicket = 1 / bowler_sr if bowler_sr > 0 else 0.03
+        prob_four = (batter_sr/100)*(bowler_econ/8.0)/6.0; prob_six = prob_four/2
+        outcomes, weights = ['WICKET',0,1,2,4,6], [prob_wicket,0.4,0.35,0.05,prob_four,prob_six]
+        outcome = random.choices(outcomes, [w/sum(weights) for w in weights])[0]
+
+        bat_stats[on_strike]['balls'] += 1; bowl_stats[bowler]['balls'] += 1
+        if outcome == 'WICKET':
+            wickets += 1; bowl_stats[bowler]['wickets'] += 1
+            if wickets < 10: on_strike = batting_lineup[wickets + 1]
+        else:
+            score += outcome; bat_stats[on_strike]['runs'] += outcome; bowl_stats[bowler]['runs'] += outcome
+            if outcome in [1, 3]: on_strike, off_strike = off_strike, on_strike
+        
+        if (i + 1) % 6 == 0 and wickets < 10: on_strike, off_strike = off_strike, on_strike; bowler_idx += 1
+            
+    return {"score": score, "wickets": wickets, "batting_card": bat_stats, "bowling_card": bowl_stats}
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="Cricket Predictive Model", layout="wide")
 st.title("🏏 Cricket Predictive Model")
@@ -150,20 +194,63 @@ if st.session_state.files:
             st.header("🏆 League & Season Analysis")
             leagues = league_df['league'].unique(); selected_league = st.selectbox("Select League", leagues)
             league_filtered = league_df[league_df['league'] == selected_league]
-            seasons = league_filtered['season'].unique(); selected_season = st.selectbox("Select Season", seasons)
+            seasons = league_filtered['season'].unique(); selected_seasons = st.multiselect("Select Season(s)", seasons, default=seasons)
             
-            season_data = league_filtered[league_filtered['season'] == selected_season]
-            team_agg = season_data.groupby('team').agg(total_runs=('runs','sum'), total_wickets=('wickets','sum'), total_fours=('fours','sum'), total_sixes=('sixes','sum')).reset_index()
+            if selected_seasons:
+                season_data = league_filtered[league_filtered['season'].isin(selected_seasons)]
+                team_agg = season_data.groupby('team').agg(total_runs=('runs','sum'), total_wickets=('wickets','sum'), total_fours=('fours','sum'), total_sixes=('sixes','sum')).reset_index()
+                
+                st.subheader(f"Team Performance in {selected_league} ({', '.join(selected_seasons)})")
+                st.dataframe(team_agg)
+                
+                st.subheader("Visualizations")
+                chart_type = st.selectbox("Select Chart", ["Total Runs", "Total Wickets", "Total Fours", "Total Sixes"])
+                if chart_type == "Total Runs": st.bar_chart(team_agg, x='team', y='total_runs')
+                if chart_type == "Total Wickets": st.bar_chart(team_agg, x='team', y='total_wickets')
+                if chart_type == "Total Fours": st.bar_chart(team_agg, x='team', y='total_fours')
+                if chart_type == "Total Sixes": st.bar_chart(team_agg, x='team', y='total_sixes')
+
+        with tab4:
+            st.header("⚡ Fast Simulator (Team-Based)"); team_list = list(teams_players.keys())
+            c1,c2 = st.columns(2); t1_name = c1.selectbox("Select Team 1", team_list, key="fs_t1"); t2_name = c2.selectbox("Select Team 2", team_list, index=1 if len(team_list)>1 else 0, key="fs_t2")
             
-            st.subheader(f"Team Performance in {selected_league} ({selected_season})")
-            st.dataframe(team_agg)
+            num_sims = st.number_input("Number of Simulations", 1, 10000, 100)
+            if st.button("▶️ Run Fast Simulation", use_container_width=True):
+                t1_stats=team_stats[team_stats['team']==t1_name].iloc[0]; t2_stats=team_stats[team_stats['team']==t2_name].iloc[0]
+                wins={t1_name:0,t2_name:0}; results={t1_name:[],t2_name:[]}
+                
+                progress_bar = st.progress(0, "Simulating...")
+                for i in range(num_sims):
+                    res1 = simulate_fast_innings(t1_stats); res2 = simulate_fast_innings(t2_stats)
+                    wins[t1_name if res1['score'] > res2['score'] else t2_name] += 1
+                    results[t1_name].append(res1); results[t2_name].append(res2)
+                    progress_bar.progress((i+1)/num_sims, f"Simulating... {i+1}/{num_sims}")
+                
+                st.subheader("Match Win Probabilities"); win_p1=(wins[t1_name]/num_sims)*100
+                st.metric(f"{t1_name} Win Probability", f"{win_p1:.1f}%"); st.metric(f"{t2_name} Win Probability", f"{100-win_p1:.1f}%")
+
+                df1=pd.DataFrame(results[t1_name]); df2=pd.DataFrame(results[t2_name])
+                with st.expander("View Detailed Market Predictions"):
+                    st.metric("Expected Runs", f"{df1['score'].mean():.0f} - {df2['score'].mean():.0f}")
+                    st.metric("Expected Fours", f"{df1['fours'].mean():.1f} - {df2['fours'].mean():.1f}")
+                    st.metric("Expected Sixes", f"{df1['sixes'].mean():.1f} - {df2['sixes'].mean():.1f}")
+        
+        with tab5:
+            st.header("🏏 Advanced Simulator (Player-Based)"); c1,c2=st.columns(2)
+            team1_name = c1.selectbox("Select Batting Team", teams_players.keys(), key="as_t1"); team2_name = c2.selectbox("Select Bowling Team", teams_players.keys(), index=1 if len(teams_players.keys())>1 else 0, key="as_t2")
             
-            st.subheader("Visualizations")
-            chart_type = st.selectbox("Select Chart", ["Total Runs", "Total Wickets", "Total Fours", "Total Sixes"])
-            if chart_type == "Total Runs": st.bar_chart(team_agg, x='team', y='total_runs')
-            if chart_type == "Total Wickets": st.bar_chart(team_agg, x='team', y='total_wickets')
-            if chart_type == "Total Fours": st.bar_chart(team_agg, x='team', y='total_fours')
-            if chart_type == "Total Sixes": st.bar_chart(team_agg, x='team', y='total_sixes')
+            l1,l2=st.columns(2)
+            lineup1=l1.multiselect(f"Select {team1_name} Lineup", options=teams_players[team1_name], default=get_last_match_lineup(team1_name, st.session_state.files)[:11], max_selections=11)
+            lineup2=l2.multiselect(f"Select {team2_name} Lineup", options=teams_players[team2_name], default=get_last_match_lineup(team2_name, st.session_state.files)[:11], max_selections=11)
+            
+            if st.button("▶️ Run Advanced Simulation", use_container_width=True):
+                if len(lineup1)!=11 or len(lineup2)!=11: st.error("Please select exactly 11 players for each team.")
+                else:
+                    result=simulate_player_based_innings(lineup1, lineup2, batting_df, bowling_df)
+                    st.subheader(f"Simulated Innings Result: {result['score']}/{result['wickets']}")
+                    c1,c2=st.columns(2)
+                    c1.dataframe(pd.DataFrame.from_dict(result['batting_card'], orient='index').reset_index().rename(columns={'index':'Batter'}))
+                    c2.dataframe(pd.DataFrame.from_dict(result['bowling_card'], orient='index').reset_index().rename(columns={'index':'Bowler'}))
 
     else:
         st.warning("Could not process uploaded files.")
