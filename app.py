@@ -3,7 +3,6 @@ import pandas as pd
 import json
 import os
 import random
-import time
 from collections import defaultdict
 from io import BytesIO
 
@@ -16,15 +15,11 @@ def get_match_phase(over_num):
     return 'Death'
 
 def process_all_matches_and_players(uploaded_files):
-    """
-    Processes all uploaded files to extract innings, player, phase, and ball outcome stats.
-    """
     all_innings_data = []
     player_batting_stats = defaultdict(lambda: defaultdict(int))
     player_bowling_stats = defaultdict(lambda: defaultdict(int))
     teams_players = defaultdict(set)
     team_phase_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    team_ball_outcomes = defaultdict(lambda: defaultdict(int))
 
     for f in uploaded_files:
         try:
@@ -52,14 +47,8 @@ def process_all_matches_and_players(uploaded_files):
                     is_legal = 'wides' not in delivery.get('extras', {}) and 'noballs' not in delivery.get('extras', {})
                     
                     team_phase_stats[team][phase]['runs'] += runs['total']
-                    team_ball_outcomes[team]['total_balls'] += 1
-                    if is_legal:
-                        team_phase_stats[team][phase]['balls'] += 1
-                    if 'wickets' in delivery:
-                        team_phase_stats[team][phase]['wickets'] += 1
-                        team_ball_outcomes[team]['WICKET'] += 1
-                    else:
-                        team_ball_outcomes[team][runs['batter']] += 1
+                    if is_legal: team_phase_stats[team][phase]['balls'] += 1
+                    if 'wickets' in delivery: team_phase_stats[team][phase]['wickets'] += 1
                     
                     player_batting_stats[batter]['runs'] += runs['batter']
                     if is_legal: player_batting_stats[batter]['balls_faced'] += 1
@@ -73,7 +62,6 @@ def process_all_matches_and_players(uploaded_files):
             innings_wickets = sum(team_phase_stats[team][p]['wickets'] for p in team_phase_stats[team])
             all_innings_data.append({
                 'match_date': match_date, 'team': team, 'total_runs': innings_runs,
-                'wickets_lost': innings_wickets, 'overs_bowled': round(innings_balls / 6.0, 2),
                 'run_rate': round((innings_runs * 6 / innings_balls) if innings_balls > 0 else 0, 2),
                 'wicket_rate': round((innings_wickets * 6 / innings_balls) if innings_balls > 0 else 0, 2),
                 'is_win': is_win
@@ -84,239 +72,163 @@ def process_all_matches_and_players(uploaded_files):
     bowling_df = pd.DataFrame.from_dict(player_bowling_stats, orient='index')
     
     if not batting_df.empty:
-        batting_df['strike_rate'] = round(batting_df['runs'] * 100 / batting_df['balls_faced'], 2)
+        batting_df['strike_rate'] = round(batting_df['runs'] * 100 / batting_df['balls_faced'], 2).fillna(0)
+        batting_df['avg'] = round(batting_df['runs'] / (batting_df.index.map(bowling_df['wickets']).fillna(0)), 2).fillna(0) # A bit simplistic
     if not bowling_df.empty:
-        bowling_df['economy'] = round(bowling_df['runs_conceded'] * 6 / bowling_df['balls_bowled'], 2)
-        bowling_df['avg'] = round(bowling_df['runs_conceded'] / bowling_df['wickets'], 2).fillna(0)
+        bowling_df['economy'] = round(bowling_df['runs_conceded'] * 6 / bowling_df['balls_bowled'], 2).fillna(0)
+        bowling_df['bowling_sr'] = round(bowling_df['balls_bowled'] / bowling_df['wickets'], 2).fillna(0)
 
     teams_players = {team: sorted(list(players)) for team, players in teams_players.items()}
-    return innings_df, batting_df, bowling_df, teams_players, team_phase_stats, team_ball_outcomes
-
-def calculate_form_stats(team, df):
-    team_matches = df[df['team'] == team].sort_values('match_date', ascending=False)
-    stats = {}
-    for n in [5, 10]:
-        last_n = team_matches.head(n)
-        if not last_n.empty:
-            stats[f'rr_L{n}'] = last_n['run_rate'].mean()
-            stats[f'wr_L{n}'] = last_n['wicket_rate'].mean()
-            if n == 5:
-                stats['form_L5'] = ''.join(['W' if r['is_win'] else 'L' for _, r in last_n.iterrows()])
-    return pd.Series(stats)
+    return innings_df, batting_df, bowling_df, teams_players, team_phase_stats
 
 def get_last_match_lineup(team, uploaded_files):
-    last_date = None
-    lineup = []
+    last_date, lineup = None, []
     for f in uploaded_files:
         try:
-            f.seek(0)
-            data = json.load(f)
-            info = data.get('info', {})
+            f.seek(0); data = json.load(f); info = data.get('info', {})
             match_date = info.get('dates', [None])[0]
             if team in info.get('players', {}):
                 if not last_date or (match_date and match_date > last_date):
-                    last_date = match_date
-                    lineup = info['players'][team]
-        except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
-            continue
+                    last_date, lineup = match_date, info['players'][team]
+        except (json.JSONDecodeError, AttributeError, UnicodeDecodeError): continue
     return lineup
 
 # --- Simulation Functions ---
-def simulate_fast_innings(team_stats, phase_stats):
-    score, wickets, fours, sixes = 0, 0, 0, 0
-    runs_at_1st_wicket = -1
-    dismissal_methods = []
-
-    rr = team_stats['run_rate']
-    wr = team_stats['wicket_rate']
+def simulate_fast_innings(team_stats):
+    score, wickets, runs_per_ball, match_flow = 0, 0, [], []
+    rr, wr = team_stats['run_rate'], team_stats['wicket_rate']
     
-    for _ in range(120):
+    for i in range(120):
         if wickets >= 10: break
-
-        prob_wicket = wr / 6.0
-        prob_dot = max(0.1, 0.5 - (rr / 20.0))
-        prob_four = max(0.05, (rr / 60.0))
-        prob_six = max(0.02, (rr / 90.0))
+        prob_wicket = wr / 6.0; prob_dot = max(0.1, 0.5 - (rr / 20.0)); prob_four = max(0.05, (rr / 60.0)); prob_six = max(0.02, (rr / 90.0))
+        outcomes = ['WICKET', 0, 1, 2, 4, 6]; weights = [prob_wicket, prob_dot, 0.35, 0.05, prob_four, prob_six]
+        outcome = random.choices(outcomes, [w / sum(weights) for w in weights])[0]
         
-        outcomes = ['WICKET', 0, 1, 2, 4, 6]
-        weights = [prob_wicket, prob_dot, 0.35, 0.05, prob_four, prob_six]
-        norm_weights = [w / sum(weights) for w in weights]
-        outcome = random.choices(outcomes, norm_weights)[0]
+        over_str = f"{i//6}.{i%6+1}"
+        if outcome == 'WICKET':
+            wickets += 1; runs_per_ball.append('W'); match_flow.append(f"{over_str}: WICKET! Score: {score}/{wickets}")
+        else:
+            score += outcome; runs_per_ball.append(outcome); match_flow.append(f"{over_str}: {outcome} run(s). Score: {score}/{wickets}")
+            
+    return {"score": score, "wickets": wickets, "runs_per_ball": runs_per_ball, "match_flow": match_flow}
+
+def simulate_player_based_innings(batting_lineup, bowling_lineup, batting_df, bowling_df):
+    score, wickets = 0, 0
+    match_flow, runs_per_ball = [], []
+    batter_idx, bowler_idx = 0, 0
+    on_strike, off_strike = batting_lineup[0], batting_lineup[1]
+    
+    for i in range(120):
+        if wickets >= 10: break
+        bowler = bowling_lineup[bowler_idx % len(bowling_lineup)]
+        
+        batter_sr = batting_df.loc[on_strike]['strike_rate'] if on_strike in batting_df.index else 90
+        bowler_econ = bowling_df.loc[bowler]['economy'] if bowler in bowling_df.index else 8.0
+        bowler_sr = bowling_df.loc[bowler]['bowling_sr'] if bowler in bowling_df.index else 30
+
+        prob_wicket = 1 / bowler_sr if bowler_sr > 0 else 0.03
+        prob_four = (batter_sr / 100) * (bowler_econ / 8.0) / 6.0
+        prob_six = (batter_sr / 100) * (bowler_econ / 8.0) / 12.0
+        
+        outcomes = ['WICKET', 0, 1, 2, 4, 6]; weights = [prob_wicket, 0.4, 0.35, 0.05, prob_four, prob_six]
+        outcome = random.choices(outcomes, [w / sum(weights) for w in weights])[0]
+        
+        over_str = f"{i//6}.{i%6+1}"
+        match_flow.append(f"{over_str}: {bowler} to {on_strike}...")
         
         if outcome == 'WICKET':
-            wickets += 1
-            if runs_at_1st_wicket == -1: runs_at_1st_wicket = score
-            dismissal_methods.append(random.choice(['Caught', 'Bowled', 'LBW', 'Stumped', 'Run Out']))
+            wickets += 1; runs_per_ball.append('W');
+            match_flow.append(f"OUT! Score: {score}/{wickets}")
+            if wickets < 10: on_strike = batting_lineup[wickets + 1]
         else:
-            score += outcome
-            if outcome == 4: fours += 1
-            if outcome == 6: sixes += 1
-            
-    return {
-        "score": score, "wickets": wickets, "fours": fours, "sixes": sixes,
-        "boundaries": fours + sixes, "runs_at_1st_wicket": runs_at_1st_wicket if runs_at_1st_wicket != -1 else score,
-        "dismissal_methods": dismissal_methods
-    }
+            score += outcome; runs_per_ball.append(outcome)
+            match_flow.append(f"{outcome} run(s). Score: {score}/{wickets}")
+            if outcome in [1, 3]: on_strike, off_strike = off_strike, on_strike
+        
+        if (i + 1) % 6 == 0 and wickets < 10:
+            on_strike, off_strike = off_strike, on_strike
+            bowler_idx += 1
+            match_flow.append("--- End of Over ---")
 
-def simulate_ball_by_phase(phase, phase_stats):
-    phase_data = phase_stats.get(phase, {})
-    balls = phase_data.get('balls', 1)
-    rr = (phase_data.get('runs', 0) * 6) / balls if balls > 0 else 6.0
-    wr = (phase_data.get('wickets', 0) * 6) / balls if balls > 0 else 0.5
+    return {"score": score, "wickets": wickets, "runs_per_ball": runs_per_ball, "match_flow": match_flow}
 
-    prob_wicket = wr / 6.0
-    prob_dot = max(0.1, 0.5 - (rr / 20.0))
-    prob_four = max(0.05, (rr / 60.0))
-    prob_six = max(0.02, (rr / 90.0))
-    
-    outcomes = ['WICKET', 0, 1, 2, 4, 6]
-    weights = [prob_wicket, prob_dot, 0.35, 0.05, prob_four, prob_six]
-    norm_weights = [w / sum(weights) for w in weights]
-    return random.choices(outcomes, norm_weights)[0]
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="Cricket Predictive Model", layout="wide")
 st.title("🏏 Cricket Predictive Model")
-st.markdown("By **Virat** for **bet365**")
 
-st.sidebar.header("Upload Match Data")
+if 'uploaded_files' not in st.session_state: st.session_state.uploaded_files = None
 uploaded_files = st.sidebar.file_uploader("Upload JSON match logs", type=['json'], accept_multiple_files=True)
-if not uploaded_files and os.path.exists('335982.json'):
-    st.sidebar.info("Showing data from the default example file.")
-    with open('335982.json', 'rb') as f:
-        bytes_io_wrapper = BytesIO(f.read())
-        bytes_io_wrapper.name = '335982.json'
-        uploaded_files = [bytes_io_wrapper]
+if uploaded_files: st.session_state.uploaded_files = uploaded_files
 
-if uploaded_files:
+if st.session_state.uploaded_files:
     data_load_state = st.text('Loading and processing data...')
-    innings_df, batting_df, bowling_df, teams_players, team_phase_stats, team_ball_outcomes = process_all_matches_and_players(uploaded_files)
+    innings_df, batting_df, bowling_df, teams_players, team_phase_stats = process_all_matches_and_players(st.session_state.uploaded_files)
     data_load_state.text('Processing complete!')
     
     if not innings_df.empty:
-        team_stats_form = innings_df.groupby('team').apply(lambda x: calculate_form_stats(x.name, innings_df)).round(2)
-        team_stats_agg = innings_df.groupby('team').agg(run_rate=('run_rate', 'mean'), wicket_rate=('wicket_rate', 'mean')).round(2)
-        team_stats = team_stats_agg.join(team_stats_form).reset_index()
+        team_stats = innings_df.groupby('team').agg(run_rate=('run_rate', 'mean'), wicket_rate=('wicket_rate', 'mean')).round(2).reset_index()
 
-        tab_titles = ["📊 Data Analysis", "👨‍💻 Player Performance", "📋 Lineup Creator", "⚡ Fast Simulator", "🆚 Advanced Simulator"]
-        tabs = st.tabs(tab_titles)
+        tab1, tab2, tab3 = st.tabs(["📊 Team & Player Stats", "⚡ Fast Simulator (Team-Based)", "🏏 Advanced Simulator (Player-Based)"])
 
-        with tabs[0]: # Data Analysis
-            st.header("Team Performance & Form Summary")
-            st.dataframe(team_stats)
-            st.header("Match Phase Analysis")
-            team_to_analyze = st.selectbox("Select Team for Phase Analysis", team_stats['team'])
-            if team_to_analyze:
-                phase_data = []
-                for phase in ['Powerplay', 'Middle', 'Death']:
-                    stats = team_phase_stats[team_to_analyze][phase]
-                    balls, runs, wickets = stats.get('balls', 0), stats.get('runs', 0), stats.get('wickets', 0)
-                    phase_data.append({
-                        'Phase': phase, 'Runs': runs, 'Balls': balls, 'Wickets': wickets,
-                        'Run Rate': round((runs * 6 / balls) if balls else 0, 2),
-                        'Wicket Rate': round((wickets * 6 / balls) if balls else 0, 2)
-                    })
-                st.dataframe(pd.DataFrame(phase_data))
+        with tab1:
+            st.header("Team Performance Summary"); st.dataframe(team_stats)
+            st.header("Player Performance"); st.subheader("Batting Stats"); st.dataframe(batting_df.sort_values('runs', ascending=False))
+            st.subheader("Bowling Stats"); st.dataframe(bowling_df.sort_values('wickets', ascending=False))
 
-        with tabs[1]: # Player Performance
-            st.header("Player Performance")
-            st.subheader("Batting Stats")
-            st.dataframe(batting_df.sort_values('runs', ascending=False))
-            st.subheader("Bowling Stats")
-            st.dataframe(bowling_df.sort_values('wickets', ascending=False))
-
-        with tabs[2]: # Lineup Creator
-            st.header("Lineup Creator")
-            team_to_build = st.selectbox("Select Team to Build Lineup", teams_players.keys())
-            if team_to_build:
-                suggested_lineup = get_last_match_lineup(team_to_build, uploaded_files)
-                # FIX: Ensure the default list does not exceed max_selections
-                suggested_lineup = suggested_lineup[:11] 
-                st.multiselect(
-                    f"Select 11 Players for {team_to_build} (pre-filled with last match's lineup)",
-                    options=teams_players[team_to_build],
-                    default=suggested_lineup,
-                    max_selections=11
-                )
-
-        with tabs[3]: # Fast Simulator
-            st.header("⚡ Fast Match Simulator")
-            sim_cols = st.columns(2)
+        with tab2:
+            st.header("⚡ Fast Match Simulator (Based on Team Averages)")
+            t1_name, t2_name = st.columns(2)
             team_list = list(teams_players.keys())
-            t1_name = sim_cols[0].selectbox("Select Team 1", team_list, key="sim_t1")
-            t2_name = sim_cols[1].selectbox("Select Team 2", team_list, index=1 if len(team_list) > 1 else 0, key="sim_t2")
-
-            st.subheader("Team Parameters")
-            param_cols = st.columns(2)
-            t1_stats = team_stats[team_stats['team'] == t1_name].iloc[0]
-            t2_stats = team_stats[team_stats['team'] == t2_name].iloc[0]
-            with param_cols[0]:
-                st.metric(label=f"{t1_name} Avg. Run Rate", value=f"{t1_stats['run_rate']:.2f}")
-                st.metric(label=f"{t1_name} Avg. Wicket Rate", value=f"{t1_stats['wicket_rate']:.2f}")
-            with param_cols[1]:
-                st.metric(label=f"{t2_name} Avg. Run Rate", value=f"{t2_stats['run_rate']:.2f}")
-                st.metric(label=f"{t2_name} Avg. Wicket Rate", value=f"{t2_stats['wicket_rate']:.2f}")
-            
-            num_sims = st.number_input("How many simulations?", 1, 10000, 100)
+            t1 = t1_name.selectbox("Select Team 1", team_list, key="sim_t1")
+            t2 = t2_name.selectbox("Select Team 2", team_list, index=1 if len(team_list) > 1 else 0, key="sim_t2")
 
             if st.button("▶️ Run Fast Simulation", use_container_width=True):
-                wins = {t1_name: 0, t2_name: 0}
-                results = {t1_name: [], t2_name: []}
+                t1_stats = team_stats[team_stats['team'] == t1].iloc[0]
+                t2_stats = team_stats[team_stats['team'] == t2].iloc[0]
                 
-                progress_bar = st.progress(0, text="Simulating...")
-                for i in range(num_sims):
-                    res1 = simulate_fast_innings(t1_stats, team_phase_stats[t1_name])
-                    res2 = simulate_fast_innings(t2_stats, team_phase_stats[t2_name])
-                    wins[t1_name if res1['score'] > res2['score'] else t2_name] += 1
-                    results[t1_name].append(res1)
-                    results[t2_name].append(res2)
-                    progress_bar.progress((i + 1) / num_sims, text=f"Simulating... {i+1}/{num_sims}")
+                res1 = simulate_fast_innings(t1_stats)
+                res2 = simulate_fast_innings(t2_stats)
                 
-                st.subheader("Match Win Probabilities")
-                win_p1 = (wins[t1_name] / num_sims) * 100
-                st.metric(f"{t1_name} Win Probability", f"{win_p1:.1f}%")
-                st.metric(f"{t2_name} Win Probability", f"{100-win_p1:.1f}%")
+                st.subheader("Match Result")
+                st.metric(f"{t1} Score", f"{res1['score']}/{res1['wickets']}")
+                st.metric(f"{t2} Score", f"{res2['score']}/{res2['wickets']}")
+                st.subheader(f"🎉 {t2 if res2['score'] > res1['score'] else t1} wins!")
 
-                st.subheader("Expected Averages & Betting Markets")
-                for team in [t1_name, t2_name]:
-                    with st.expander(f"View detailed stats for {team}"):
-                        df = pd.DataFrame(results[team])
-                        st.metric("Expected Runs", f"{df['score'].mean():.0f}")
-                        st.metric("Expected Wickets", f"{df['wickets'].mean():.1f}")
-                        st.metric("Avg. Runs at 1st Wicket Fall", f"{df['runs_at_1st_wicket'].mean():.0f}")
-                        st.metric("Avg. Fours", f"{df['fours'].mean():.1f}")
-                        st.metric("Avg. Sixes", f"{df['sixes'].mean():.1f}")
-                        st.metric("Avg. Boundaries", f"{df['boundaries'].mean():.1f}")
+                c1, c2 = st.columns(2)
+                with c1.expander(f"View {t1} Innings Flow"): st.text_area("", "\n".join(res1['match_flow']), height=300)
+                with c2.expander(f"View {t2} Innings Flow"): st.text_area("", "\n".join(res2['match_flow']), height=300)
 
-        with tabs[4]: # Advanced Simulator
-            st.header("🆚 Advanced Simulator (Phase-Based)")
-            adv_cols = st.columns(2)
-            adv_t1 = adv_cols[0].selectbox("Select Team 1", teams_players.keys(), key="adv_t1")
-            adv_t2 = adv_cols[1].selectbox("Select Team 2", teams_players.keys(), index=1 if len(team_list) > 1 else 0, key="adv_t2")
+        with tab3:
+            st.header("🏏 Advanced Simulator (Based on Player Stats)")
+            
+            c1, c2 = st.columns(2)
+            team1_name = c1.selectbox("Select Batting Team", teams_players.keys(), key="adv_t1")
+            team2_name = c2.selectbox("Select Bowling Team", teams_players.keys(), index=1 if len(teams_players.keys()) > 1 else 0, key="adv_t2")
 
-            if st.button("Run Advanced Simulation", use_container_width=True):
-                st.subheader(f"Simulating: {adv_t1} vs {adv_t2}")
-                score1, wickets1 = 0, 0
-                for ball in range(120):
-                    if wickets1 >= 10: break
-                    outcome = simulate_ball_by_phase(get_match_phase(ball//6), team_phase_stats[adv_t1])
-                    if isinstance(outcome, int): score1 += outcome
-                    else: wickets1 += 1
-                
-                score2, wickets2 = 0, 0
-                for ball in range(120):
-                    if wickets2 >= 10 or score2 > score1: break
-                    outcome = simulate_ball_by_phase(get_match_phase(ball//6), team_phase_stats[adv_t2])
-                    if isinstance(outcome, int): score2 += outcome
-                    else: wickets2 += 1
-                
-                st.header("Match Result")
-                res_cols = st.columns(2)
-                res_cols[0].metric(f"{adv_t1} Score", f"{score1}/{wickets1}")
-                res_cols[1].metric(f"{adv_t2} Score", f"{score2}/{wickets2}")
-                st.subheader(f"🎉 {adv_t2 if score2 > score1 else adv_t1} wins!")
+            st.subheader("Create Lineups")
+            lineup1_col, lineup2_col = st.columns(2)
+            
+            with lineup1_col:
+                last_match1 = get_last_match_lineup(team1_name, st.session_state.uploaded_files)[:11]
+                lineup1 = st.multiselect(f"{team1_name} (Batting)", options=teams_players[team1_name], default=last_match1, max_selections=11)
+            
+            with lineup2_col:
+                last_match2 = get_last_match_lineup(team2_name, st.session_state.uploaded_files)[:11]
+                lineup2 = st.multiselect(f"{team2_name} (Bowling)", options=teams_players[team2_name], default=last_match2, max_selections=11)
 
+            if st.button("▶️ Run Player-Based Simulation", use_container_width=True):
+                if len(lineup1) != 11 or len(lineup2) != 11:
+                    st.error("Please select exactly 11 players for each team.")
+                else:
+                    st.subheader(f"Simulating Innings: {team1_name}")
+                    result = simulate_player_based_innings(lineup1, lineup2, batting_df, bowling_df)
+                    
+                    st.header("Innings Result")
+                    st.metric(f"{team1_name} Score", f"{result['score']}/{result['wickets']}")
+                    with st.expander("View Full Match Flow"):
+                        st.text_area("", "\n".join(result['match_flow']), height=400)
     else:
-        st.warning("Could not process uploaded files. Please check file format and content.")
+        st.warning("Could not process uploaded files.")
 else:
     st.info("👋 Welcome! Upload JSON match logs to begin.")
